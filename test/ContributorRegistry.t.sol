@@ -1,0 +1,228 @@
+// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.24;
+
+import {Test, console2} from "forge-std/Test.sol";
+import {ContributorRegistry} from "../contracts/ContributorRegistry.sol";
+
+contract ContributorRegistryTest is Test {
+    ContributorRegistry public registry;
+
+    address public admin = makeAddr("admin");
+    address public registrar = makeAddr("registrar");
+    address public alice = makeAddr("alice");
+    address public bob = makeAddr("bob");
+
+    bytes32 public constant PROJECT_A = keccak256("PROJECT_A");
+    bytes32 public constant PROJECT_B = keccak256("PROJECT_B");
+
+    function setUp() public {
+        registry = new ContributorRegistry(admin);
+
+        vm.startPrank(admin);
+        registry.grantRole(registry.REGISTRAR_ROLE(), registrar);
+        vm.stopPrank();
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          REGISTRATION TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Register_Success() public {
+        vm.prank(registrar);
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "ipfs://alice");
+
+        ContributorRegistry.Contributor memory c = registry.getContributor(alice, PROJECT_A);
+        assertEq(c.contributor, alice);
+        assertEq(c.weight, 5000);
+        assertTrue(c.active);
+        assertEq(uint8(c.role), uint8(ContributorRegistry.Role.CONTRIBUTOR));
+    }
+
+    function test_Register_EmitsEvent() public {
+        vm.expectEmit(true, true, false, true);
+        emit ContributorRegistry.ContributorRegistered(alice, PROJECT_A, ContributorRegistry.Role.MAINTAINER, 3000);
+
+        vm.prank(registrar);
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.MAINTAINER, 3000, "");
+    }
+
+    function test_Register_RevertsIfAlreadyRegistered() public {
+        vm.startPrank(registrar);
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "");
+        vm.expectRevert(
+            abi.encodeWithSelector(ContributorRegistry.AlreadyRegistered.selector, alice, PROJECT_A)
+        );
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "");
+        vm.stopPrank();
+    }
+
+    function test_Register_RevertsOnZeroAddress() public {
+        vm.prank(registrar);
+        vm.expectRevert(ContributorRegistry.InvalidAddress.selector);
+        registry.register(address(0), PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "");
+    }
+
+    function test_Register_RevertsOnZeroProjectId() public {
+        vm.prank(registrar);
+        vm.expectRevert(ContributorRegistry.InvalidProjectId.selector);
+        registry.register(alice, bytes32(0), ContributorRegistry.Role.CONTRIBUTOR, 5000, "");
+    }
+
+    function test_Register_RevertsOnZeroWeight() public {
+        vm.prank(registrar);
+        vm.expectRevert(abi.encodeWithSelector(ContributorRegistry.InvalidWeight.selector, 0));
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 0, "");
+    }
+
+    function test_Register_RevertsOnWeightExceedingMax() public {
+        vm.prank(registrar);
+        vm.expectRevert(abi.encodeWithSelector(ContributorRegistry.InvalidWeight.selector, 10_001));
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 10_001, "");
+    }
+
+    function test_Register_RevertsIfNotRegistrar() public {
+        vm.prank(alice);
+        vm.expectRevert();
+        registry.register(bob, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "");
+    }
+
+    function test_Register_IncrementsTotalContributors() public {
+        assertEq(registry.totalContributors(), 0);
+
+        vm.startPrank(registrar);
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "");
+        registry.register(bob, PROJECT_A, ContributorRegistry.Role.MAINTAINER, 3000, "");
+        vm.stopPrank();
+
+        assertEq(registry.totalContributors(), 2);
+    }
+
+    function test_Register_SameAddressDifferentProjects() public {
+        vm.startPrank(registrar);
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "");
+        registry.register(alice, PROJECT_B, ContributorRegistry.Role.MAINTAINER, 3000, "");
+        vm.stopPrank();
+
+        assertEq(registry.totalContributors(), 2);
+        assertEq(uint8(registry.getContributor(alice, PROJECT_A).role), uint8(ContributorRegistry.Role.CONTRIBUTOR));
+        assertEq(uint8(registry.getContributor(alice, PROJECT_B).role), uint8(ContributorRegistry.Role.MAINTAINER));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            UPDATE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Update_Success() public {
+        vm.startPrank(registrar);
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "old");
+        registry.update(alice, PROJECT_A, ContributorRegistry.Role.MAINTAINER, 7000, "new");
+        vm.stopPrank();
+
+        ContributorRegistry.Contributor memory c = registry.getContributor(alice, PROJECT_A);
+        assertEq(uint8(c.role), uint8(ContributorRegistry.Role.MAINTAINER));
+        assertEq(c.weight, 7000);
+        assertEq(c.metadata, "new");
+    }
+
+    function test_Update_RevertsIfNotRegistered() public {
+        vm.prank(registrar);
+        vm.expectRevert(
+            abi.encodeWithSelector(ContributorRegistry.NotRegistered.selector, alice, PROJECT_A)
+        );
+        registry.update(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "");
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                      DEACTIVATION / REACTIVATION
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Deactivate_Success() public {
+        vm.startPrank(registrar);
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "");
+        registry.deactivate(alice, PROJECT_A);
+        vm.stopPrank();
+
+        assertFalse(registry.isActive(alice, PROJECT_A));
+    }
+
+    function test_Reactivate_Success() public {
+        vm.startPrank(registrar);
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "");
+        registry.deactivate(alice, PROJECT_A);
+        registry.reactivate(alice, PROJECT_A);
+        vm.stopPrank();
+
+        assertTrue(registry.isActive(alice, PROJECT_A));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                              VIEW TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_GetProjectContributors() public {
+        vm.startPrank(registrar);
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "");
+        registry.register(bob, PROJECT_A, ContributorRegistry.Role.MAINTAINER, 3000, "");
+        vm.stopPrank();
+
+        address[] memory contributors = registry.getProjectContributors(PROJECT_A);
+        assertEq(contributors.length, 2);
+        assertEq(contributors[0], alice);
+        assertEq(contributors[1], bob);
+    }
+
+    function test_IsRegistered() public {
+        assertFalse(registry.isRegistered(alice, PROJECT_A));
+
+        vm.prank(registrar);
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "");
+
+        assertTrue(registry.isRegistered(alice, PROJECT_A));
+    }
+
+    function test_GetWeight() public {
+        vm.prank(registrar);
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 4200, "");
+        assertEq(registry.getWeight(alice, PROJECT_A), 4200);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          PAUSE TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_Pause_BlocksRegistration() public {
+        vm.prank(admin);
+        registry.pause();
+
+        vm.prank(registrar);
+        vm.expectRevert();
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "");
+    }
+
+    function test_Unpause_ResumesRegistration() public {
+        vm.startPrank(admin);
+        registry.pause();
+        registry.unpause();
+        vm.stopPrank();
+
+        vm.prank(registrar);
+        registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000, "");
+        assertTrue(registry.isActive(alice, PROJECT_A));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           FUZZ TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function testFuzz_Register_WeightBounds(uint96 weight) public {
+        if (weight == 0 || weight > 10_000) {
+            vm.prank(registrar);
+            vm.expectRevert();
+            registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, weight, "");
+        } else {
+            vm.prank(registrar);
+            registry.register(alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, weight, "");
+            assertEq(registry.getWeight(alice, PROJECT_A), weight);
+        }
+    }
+}

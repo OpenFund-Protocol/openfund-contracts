@@ -1,0 +1,12 @@
+# Foundry
+out/
+cache/
+broadcast/
+
+# Environment
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
