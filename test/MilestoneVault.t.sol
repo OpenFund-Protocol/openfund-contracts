@@ -14,6 +14,9 @@ contract MilestoneVaultTest is Test {
     address public recipient = makeAddr("recipient");
     address public validator = makeAddr("validator");
     address public attacker = makeAddr("attacker");
+    address public arbitrator = makeAddr("arbitrator");
+
+    uint48 public constant DISPUTE_WINDOW = 7 days;
 
     function setUp() public {
         vault = new MilestoneVault(admin);
@@ -24,6 +27,10 @@ contract MilestoneVaultTest is Test {
 
         vm.prank(funder);
         token.approve(address(vault), type(uint256).max);
+
+        vm.startPrank(admin);
+        vault.grantRole(vault.ARBITRATOR_ROLE(), arbitrator);
+        vm.stopPrank();
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -32,7 +39,7 @@ contract MilestoneVaultTest is Test {
 
     function test_CreateETHVault_Success() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator, true);
+        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator, true, DISPUTE_WINDOW);
 
         MilestoneVault.Vault memory v = vault.getVault(vaultId);
         assertEq(v.funder, funder);
@@ -41,6 +48,7 @@ contract MilestoneVaultTest is Test {
         assertEq(v.token, address(0));
         assertEq(v.totalDeposited, 10 ether);
         assertTrue(v.sequential);
+        assertEq(v.disputeWindowSeconds, DISPUTE_WINDOW);
         assertEq(uint8(v.status), uint8(MilestoneVault.VaultStatus.Active));
     }
 
@@ -49,24 +57,40 @@ contract MilestoneVaultTest is Test {
         emit MilestoneVault.VaultCreated(0, funder, recipient, validator, address(0), 5 ether);
 
         vm.prank(funder);
-        vault.createETHVault{value: 5 ether}(recipient, validator, true);
+        vault.createETHVault{value: 5 ether}(recipient, validator, true, DISPUTE_WINDOW);
     }
 
     function test_CreateETHVault_RevertsOnZeroRecipient() public {
         vm.prank(funder);
         vm.expectRevert(MilestoneVault.InvalidAddress.selector);
-        vault.createETHVault{value: 1 ether}(address(0), validator, true);
+        vault.createETHVault{value: 1 ether}(address(0), validator, true, DISPUTE_WINDOW);
     }
 
     function test_CreateETHVault_RevertsOnZeroValidator() public {
         vm.prank(funder);
         vm.expectRevert(MilestoneVault.InvalidAddress.selector);
-        vault.createETHVault{value: 1 ether}(recipient, address(0), true);
+        vault.createETHVault{value: 1 ether}(recipient, address(0), true, DISPUTE_WINDOW);
+    }
+
+    function test_CreateETHVault_RevertsOnInvalidDisputeWindow() public {
+        vm.prank(funder);
+        vm.expectRevert(
+            abi.encodeWithSelector(MilestoneVault.InvalidDisputeWindow.selector, uint48(0))
+        );
+        vault.createETHVault{value: 1 ether}(recipient, validator, true, 0);
+
+        vm.prank(funder);
+        uint48 tooLong = vault.MAX_DISPUTE_WINDOW() + 1;
+        vm.expectRevert(
+            abi.encodeWithSelector(MilestoneVault.InvalidDisputeWindow.selector, tooLong)
+        );
+        vault.createETHVault{value: 1 ether}(recipient, validator, true, tooLong);
     }
 
     function test_CreateERC20Vault_Success() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createERC20Vault(recipient, validator, address(token), 1000e18, true);
+        uint256 vaultId =
+            vault.createERC20Vault(recipient, validator, address(token), 1000e18, true, DISPUTE_WINDOW);
 
         MilestoneVault.Vault memory v = vault.getVault(vaultId);
         assertEq(v.token, address(token));
@@ -83,7 +107,7 @@ contract MilestoneVaultTest is Test {
         returns (uint256 vaultId, uint256 milestoneIdx)
     {
         vm.prank(funder);
-        vaultId = vault.createETHVault{value: amount}(recipient, validator, true);
+        vaultId = vault.createETHVault{value: amount}(recipient, validator, true, DISPUTE_WINDOW);
 
         vm.prank(funder);
         vault.addMilestone(vaultId, amount, "ipfs://milestone-1");
@@ -92,7 +116,7 @@ contract MilestoneVaultTest is Test {
 
     function test_AddMilestone_Success() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator, true);
+        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator, true, DISPUTE_WINDOW);
 
         vm.prank(funder);
         vault.addMilestone(vaultId, 5 ether, "ipfs://milestone-1");
@@ -105,7 +129,7 @@ contract MilestoneVaultTest is Test {
 
     function test_AddMilestone_RevertsIfExceedsDeposit() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true);
+        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true, DISPUTE_WINDOW);
 
         vm.prank(funder);
         vm.expectRevert(
@@ -116,7 +140,7 @@ contract MilestoneVaultTest is Test {
 
     function test_AddMilestone_RevertsIfNotFunder() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true);
+        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true, DISPUTE_WINDOW);
 
         vm.prank(attacker);
         vm.expectRevert(MilestoneVault.Unauthorized.selector);
@@ -148,7 +172,7 @@ contract MilestoneVaultTest is Test {
 
     function test_SubmitMilestone_EnforcesSequentialOrder() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator, true);
+        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator, true, DISPUTE_WINDOW);
 
         vm.startPrank(funder);
         vault.addMilestone(vaultId, 5 ether, "milestone-0");
@@ -247,7 +271,7 @@ contract MilestoneVaultTest is Test {
 
     function test_CancelVault_RefundsFunder() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator, true);
+        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator, true, DISPUTE_WINDOW);
 
         // Add both milestones upfront so the vault stays Active after ms-0 is approved
         vm.startPrank(funder);
@@ -283,7 +307,7 @@ contract MilestoneVaultTest is Test {
 
     function test_CancelVault_RevertsIfNotFunder() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true);
+        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true, DISPUTE_WINDOW);
 
         vm.prank(attacker);
         vm.expectRevert(MilestoneVault.Unauthorized.selector);
@@ -296,7 +320,7 @@ contract MilestoneVaultTest is Test {
 
     function test_UpdateValidator_Success() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true);
+        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true, DISPUTE_WINDOW);
 
         address newValidator = makeAddr("newValidator");
         vm.prank(funder);
@@ -311,7 +335,7 @@ contract MilestoneVaultTest is Test {
 
     function test_FundETHVault_IncreasesDeposit() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true);
+        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true, DISPUTE_WINDOW);
 
         vm.deal(attacker, 5 ether); // anyone can top-up
         vm.prank(attacker);
@@ -343,7 +367,7 @@ contract MilestoneVaultTest is Test {
 
     function test_FullMultiMilestoneFlow() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 9 ether}(recipient, validator, true);
+        uint256 vaultId = vault.createETHVault{value: 9 ether}(recipient, validator, true, DISPUTE_WINDOW);
 
         vm.startPrank(funder);
         vault.addMilestone(vaultId, 3 ether, "phase-1");
@@ -368,7 +392,7 @@ contract MilestoneVaultTest is Test {
 
     function test_ParallelVault_AnyMilestoneCanBeSubmittedFirst() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 9 ether}(recipient, validator, false);
+        uint256 vaultId = vault.createETHVault{value: 9 ether}(recipient, validator, false, DISPUTE_WINDOW);
 
         vm.startPrank(funder);
         vault.addMilestone(vaultId, 3 ether, "frontend");
@@ -404,11 +428,160 @@ contract MilestoneVaultTest is Test {
 
     function test_ParallelVault_SequentialFlagStoredCorrectly() public {
         vm.prank(funder);
-        uint256 seqId = vault.createETHVault{value: 1 ether}(recipient, validator, true);
+        uint256 seqId = vault.createETHVault{value: 1 ether}(recipient, validator, true, DISPUTE_WINDOW);
         vm.prank(funder);
-        uint256 parId = vault.createETHVault{value: 1 ether}(recipient, validator, false);
+        uint256 parId = vault.createETHVault{value: 1 ether}(recipient, validator, false, DISPUTE_WINDOW);
 
         assertTrue(vault.getVault(seqId).sequential);
         assertFalse(vault.getVault(parId).sequential);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                       DISPUTE RESOLUTION
+    //////////////////////////////////////////////////////////////*/
+
+    function _setupSubmittedMilestone() internal returns (uint256 vaultId) {
+        (vaultId,) = _setupVaultWithMilestone(5 ether);
+        vm.prank(recipient);
+        vault.submitMilestone(vaultId, 0);
+    }
+
+    function test_Escalate_RevertsBeforeWindowExpires() public {
+        uint256 vaultId = _setupSubmittedMilestone();
+
+        // Just before the window ends — should revert
+        vm.warp(block.timestamp + DISPUTE_WINDOW - 1);
+        vm.prank(recipient);
+        vm.expectRevert(
+            abi.encodeWithSelector(MilestoneVault.DisputeWindowNotExpired.selector, vaultId, 0)
+        );
+        vault.escalate(vaultId, 0);
+    }
+
+    function test_Escalate_TransitionsToDisputedAfterWindow() public {
+        uint256 vaultId = _setupSubmittedMilestone();
+
+        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+        vm.prank(recipient);
+        vault.escalate(vaultId, 0);
+
+        assertEq(
+            uint8(vault.getMilestone(vaultId, 0).status),
+            uint8(MilestoneVault.MilestoneStatus.Disputed)
+        );
+    }
+
+    function test_Escalate_EmitsEvent() public {
+        uint256 vaultId = _setupSubmittedMilestone();
+
+        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+        vm.expectEmit(true, true, false, false);
+        emit MilestoneVault.MilestoneEscalated(vaultId, 0);
+
+        vm.prank(recipient);
+        vault.escalate(vaultId, 0);
+    }
+
+    function test_Escalate_RevertsIfNotRecipient() public {
+        uint256 vaultId = _setupSubmittedMilestone();
+
+        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+        vm.prank(attacker);
+        vm.expectRevert(MilestoneVault.Unauthorized.selector);
+        vault.escalate(vaultId, 0);
+    }
+
+    function test_Escalate_RevertsIfMilestoneNotSubmitted() public {
+        (uint256 vaultId,) = _setupVaultWithMilestone(5 ether);
+        // Milestone is still Pending, not Submitted
+        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+        vm.prank(recipient);
+        vm.expectRevert(
+            abi.encodeWithSelector(MilestoneVault.MilestoneNotSubmitted.selector, vaultId, 0)
+        );
+        vault.escalate(vaultId, 0);
+    }
+
+    function test_ResolveDispute_ArbitratorApproves() public {
+        uint256 vaultId = _setupSubmittedMilestone();
+
+        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+        vm.prank(recipient);
+        vault.escalate(vaultId, 0);
+
+        uint256 recipientBefore = recipient.balance;
+        vm.prank(arbitrator);
+        vault.resolveDispute(vaultId, 0, true);
+
+        assertEq(recipient.balance - recipientBefore, 5 ether);
+        assertEq(
+            uint8(vault.getMilestone(vaultId, 0).status),
+            uint8(MilestoneVault.MilestoneStatus.Approved)
+        );
+        assertEq(uint8(vault.getVault(vaultId).status), uint8(MilestoneVault.VaultStatus.Completed));
+    }
+
+    function test_ResolveDispute_ArbitratorRejects() public {
+        uint256 vaultId = _setupSubmittedMilestone();
+
+        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+        vm.prank(recipient);
+        vault.escalate(vaultId, 0);
+
+        vm.prank(arbitrator);
+        vault.resolveDispute(vaultId, 0, false);
+
+        assertEq(
+            uint8(vault.getMilestone(vaultId, 0).status),
+            uint8(MilestoneVault.MilestoneStatus.Pending)
+        );
+    }
+
+    function test_ResolveDispute_EmitsEvent() public {
+        uint256 vaultId = _setupSubmittedMilestone();
+
+        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+        vm.prank(recipient);
+        vault.escalate(vaultId, 0);
+
+        vm.expectEmit(true, true, false, true);
+        emit MilestoneVault.DisputeResolved(vaultId, 0, true);
+
+        vm.prank(arbitrator);
+        vault.resolveDispute(vaultId, 0, true);
+    }
+
+    function test_ResolveDispute_RevertsIfNotArbitrator() public {
+        uint256 vaultId = _setupSubmittedMilestone();
+
+        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+        vm.prank(recipient);
+        vault.escalate(vaultId, 0);
+
+        vm.prank(attacker);
+        vm.expectRevert(MilestoneVault.Unauthorized.selector);
+        vault.resolveDispute(vaultId, 0, true);
+    }
+
+    function test_ResolveDispute_RevertsIfMilestoneNotDisputed() public {
+        uint256 vaultId = _setupSubmittedMilestone();
+        // Milestone is Submitted, not Disputed
+        vm.prank(arbitrator);
+        vm.expectRevert(
+            abi.encodeWithSelector(MilestoneVault.MilestoneNotDisputed.selector, vaultId, 0)
+        );
+        vault.resolveDispute(vaultId, 0, true);
+    }
+
+    function test_CancelVault_RevertsIfMilestoneDisputed() public {
+        uint256 vaultId = _setupSubmittedMilestone();
+
+        vm.warp(block.timestamp + DISPUTE_WINDOW + 1);
+        vm.prank(recipient);
+        vault.escalate(vaultId, 0);
+
+        vm.prank(funder);
+        vm.expectRevert();
+        vault.cancelVault(vaultId);
     }
 }
