@@ -89,6 +89,7 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
      * @param totalDeposited        Total amount deposited.
      * @param totalReleased         Total amount released to recipient.
      * @param status                Overall vault status.
+     * @param sequential            When true, milestones must be completed in order.
      * @param createdAt             Timestamp of vault creation.
      * @param disputeWindowSeconds  Seconds after submission before recipient can escalate.
      */
@@ -100,6 +101,7 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
         uint256 totalDeposited;
         uint256 totalReleased;
         VaultStatus status;
+        bool sequential;
         uint48 createdAt;
         uint48 disputeWindowSeconds;
     }
@@ -185,11 +187,13 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
      * @notice Create a new vault funded with ETH.
      * @param recipient             Address to receive milestone payouts.
      * @param validator             Address authorized to approve/reject milestones.
+     * @param sequential            When true, milestones must be submitted and approved in order.
+     *                              When false, any Pending milestone may be submitted independently.
      * @param disputeWindowSeconds  Seconds after milestone submission before recipient can escalate.
      *                              Must be between MIN_DISPUTE_WINDOW and MAX_DISPUTE_WINDOW.
      * @return vaultId              The ID of the newly created vault.
      */
-    function createETHVault(address recipient, address validator, uint48 disputeWindowSeconds)
+    function createETHVault(address recipient, address validator, bool sequential, uint48 disputeWindowSeconds)
         external
         payable
         whenNotPaused
@@ -202,7 +206,7 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
             revert InvalidDisputeWindow(disputeWindowSeconds);
         }
 
-        vaultId = _createVault(recipient, validator, address(0), msg.value, disputeWindowSeconds);
+        vaultId = _createVault(recipient, validator, address(0), msg.value, sequential, disputeWindowSeconds);
     }
 
     /**
@@ -212,6 +216,8 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
      * @param validator             Address authorized to approve/reject milestones.
      * @param token                 ERC-20 token address.
      * @param amount                Initial deposit amount.
+     * @param sequential            When true, milestones must be submitted and approved in order.
+     *                              When false, any Pending milestone may be submitted independently.
      * @param disputeWindowSeconds  Seconds after milestone submission before recipient can escalate.
      *                              Must be between MIN_DISPUTE_WINDOW and MAX_DISPUTE_WINDOW.
      * @return vaultId              The ID of the newly created vault.
@@ -221,6 +227,7 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
         address validator,
         address token,
         uint256 amount,
+        bool sequential,
         uint48 disputeWindowSeconds
     ) external whenNotPaused returns (uint256 vaultId) {
         if (recipient == address(0)) revert InvalidAddress();
@@ -232,7 +239,7 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
         }
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        vaultId = _createVault(recipient, validator, token, amount, disputeWindowSeconds);
+        vaultId = _createVault(recipient, validator, token, amount, sequential, disputeWindowSeconds);
     }
 
     /**
@@ -332,8 +339,8 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
             revert MilestoneNotPending(vaultId, milestoneIndex);
         }
 
-        // Enforce sequential ordering: previous milestone must be approved
-        if (milestoneIndex > 0) {
+        // Enforce sequential ordering only when the vault requires it
+        if (v.sequential && milestoneIndex > 0) {
             if (milestones[milestoneIndex - 1].status != MilestoneStatus.Approved) {
                 revert PreviousMilestoneNotApproved(milestoneIndex - 1);
             }
@@ -621,6 +628,7 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
         address validator,
         address token,
         uint256 amount,
+        bool sequential,
         uint48 disputeWindowSeconds
     ) internal returns (uint256 vaultId) {
         vaultId = nextVaultId++;
@@ -632,6 +640,7 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
             totalDeposited: amount,
             totalReleased: 0,
             status: VaultStatus.Active,
+            sequential: sequential,
             createdAt: uint48(block.timestamp),
             disputeWindowSeconds: disputeWindowSeconds
         });

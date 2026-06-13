@@ -70,6 +70,18 @@ contract SplitManager is ReentrancyGuard, Pausable, AccessControl {
     /// @notice Maximum number of payees per project to bound gas
     uint256 public constant MAX_PAYEES = 50;
 
+    /// @notice Hard cap on the protocol fee (5%)
+    uint16 public constant MAX_PROTOCOL_FEE_BPS = 500;
+
+    /// @notice Protocol fee in basis points (admin-settable, max MAX_PROTOCOL_FEE_BPS)
+    uint16 public protocolFeeBps;
+
+    /// @notice Address that receives protocol fees
+    address public feeRecipient;
+
+    /// @notice Projects that are exempt from the protocol fee
+    mapping(bytes32 => bool) public feeExempt;
+
     /*//////////////////////////////////////////////////////////////
                                 EVENTS
     //////////////////////////////////////////////////////////////*/
@@ -79,6 +91,10 @@ contract SplitManager is ReentrancyGuard, Pausable, AccessControl {
     event SplitDeactivated(bytes32 indexed projectId);
     event FundsDistributed(bytes32 indexed projectId, address indexed token, uint256 totalAmount);
     event FundsClaimed(address indexed payee, address indexed token, uint256 amount);
+    event ProtocolFeeCharged(bytes32 indexed projectId, address indexed token, uint256 feeAmount);
+    event ProtocolFeeUpdated(uint16 newFeeBps);
+    event FeeRecipientUpdated(address newFeeRecipient);
+    event FeeExemptSet(bytes32 indexed projectId, bool exempt);
 
     /*//////////////////////////////////////////////////////////////
                                 ERRORS
@@ -95,6 +111,8 @@ contract SplitManager is ReentrancyGuard, Pausable, AccessControl {
     error NothingToClaim();
     error ETHTransferFailed();
     error DuplicatePayee(address payee);
+    error FeeTooHigh();
+    error InvalidFeeRecipient();
 
     /*//////////////////////////////////////////////////////////////
                              CONSTRUCTOR
@@ -255,6 +273,36 @@ contract SplitManager is ReentrancyGuard, Pausable, AccessControl {
         _unpause();
     }
 
+    /**
+     * @notice Set the protocol fee in basis points (max 500 = 5%).
+     * @param feeBps New fee in basis points.
+     */
+    function setProtocolFee(uint16 feeBps) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (feeBps > MAX_PROTOCOL_FEE_BPS) revert FeeTooHigh();
+        protocolFeeBps = feeBps;
+        emit ProtocolFeeUpdated(feeBps);
+    }
+
+    /**
+     * @notice Set the address that receives protocol fees.
+     * @param recipient New fee recipient address.
+     */
+    function setFeeRecipient(address recipient) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        if (recipient == address(0)) revert InvalidFeeRecipient();
+        feeRecipient = recipient;
+        emit FeeRecipientUpdated(recipient);
+    }
+
+    /**
+     * @notice Mark a project as exempt from (or subject to) the protocol fee.
+     * @param projectId Project identifier.
+     * @param exempt    True to exempt the project; false to remove exemption.
+     */
+    function setFeeExempt(bytes32 projectId, bool exempt) external onlyRole(DEFAULT_ADMIN_ROLE) {
+        feeExempt[projectId] = exempt;
+        emit FeeExemptSet(projectId, exempt);
+    }
+
     /*//////////////////////////////////////////////////////////////
                                 VIEWS
     //////////////////////////////////////////////////////////////*/
@@ -285,7 +333,8 @@ contract SplitManager is ReentrancyGuard, Pausable, AccessControl {
     //////////////////////////////////////////////////////////////*/
 
     /**
-     * @dev Core distribution logic. Credits each payee's internal balance proportionally.
+     * @dev Core distribution logic. Deducts protocol fee (if applicable), then credits
+     *      each payee's internal balance proportionally from the remaining amount.
      *      Remainder (from integer division) is credited to the first payee.
      */
     function _distribute(bytes32 projectId, address token, uint256 amount) internal {
@@ -295,11 +344,23 @@ contract SplitManager is ReentrancyGuard, Pausable, AccessControl {
 
         _totalReceived[projectId][token] += amount;
 
+        uint256 distributable = amount;
+
+        // Deduct protocol fee before splitting among payees
+        if (protocolFeeBps > 0 && !feeExempt[projectId] && feeRecipient != address(0)) {
+            uint256 fee = (amount * protocolFeeBps) / 10_000;
+            if (fee > 0) {
+                distributable -= fee;
+                _claimable[feeRecipient][token] += fee;
+                emit ProtocolFeeCharged(projectId, token, fee);
+            }
+        }
+
         uint256 distributed;
         uint256 len = config.payees.length;
 
         for (uint256 i; i < len;) {
-            uint256 share = (amount * config.payees[i].bps) / 10_000;
+            uint256 share = (distributable * config.payees[i].bps) / 10_000;
             _claimable[config.payees[i].payee][token] += share;
             distributed += share;
             unchecked {
@@ -308,7 +369,7 @@ contract SplitManager is ReentrancyGuard, Pausable, AccessControl {
         }
 
         // Dust from integer division goes to the first payee
-        uint256 dust = amount - distributed;
+        uint256 dust = distributable - distributed;
         if (dust > 0 && len > 0) {
             _claimable[config.payees[0].payee][token] += dust;
         }

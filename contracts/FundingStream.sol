@@ -49,6 +49,7 @@ contract FundingStream is ReentrancyGuard, Pausable, AccessControl {
      * @param withdrawn     Amount already withdrawn by the recipient.
      * @param startTime     Unix timestamp when the stream started.
      * @param endTime       Unix timestamp when the stream fully vests.
+     * @param cliffDuration Seconds after startTime before any vesting begins (0 = no cliff).
      * @param lastUpdated   Timestamp of the last interaction (for rate recalculation).
      * @param status        Current lifecycle status.
      */
@@ -60,6 +61,7 @@ contract FundingStream is ReentrancyGuard, Pausable, AccessControl {
         uint256 withdrawn;
         uint48 startTime;
         uint48 endTime;
+        uint48 cliffDuration;
         uint48 lastUpdated;
         StreamStatus status;
     }
@@ -111,6 +113,7 @@ contract FundingStream is ReentrancyGuard, Pausable, AccessControl {
     error InvalidRecipient();
     error InvalidAmount();
     error InvalidDuration();
+    error InvalidCliffDuration();
     error StreamNotActive(uint256 streamId);
     error StreamNotPaused(uint256 streamId);
     error NotStreamSender(uint256 streamId);
@@ -136,12 +139,14 @@ contract FundingStream is ReentrancyGuard, Pausable, AccessControl {
 
     /**
      * @notice Create a new ETH funding stream.
-     * @param recipient  Address of the stream beneficiary.
-     * @param startTime  Unix timestamp for stream start (must be >= block.timestamp).
-     * @param endTime    Unix timestamp for stream end (must be > startTime + MIN_DURATION).
-     * @return streamId  The ID of the newly created stream.
+     * @param recipient      Address of the stream beneficiary.
+     * @param startTime      Unix timestamp for stream start (must be >= block.timestamp).
+     * @param endTime        Unix timestamp for stream end (must be > startTime + MIN_DURATION).
+     * @param cliffDuration  Seconds after startTime before vesting begins (0 = no cliff,
+     *                       must be strictly less than endTime - startTime).
+     * @return streamId      The ID of the newly created stream.
      */
-    function createETHStream(address recipient, uint48 startTime, uint48 endTime)
+    function createETHStream(address recipient, uint48 startTime, uint48 endTime, uint48 cliffDuration)
         external
         payable
         whenNotPaused
@@ -151,6 +156,7 @@ contract FundingStream is ReentrancyGuard, Pausable, AccessControl {
         if (msg.value == 0) revert InvalidAmount();
         if (startTime < block.timestamp) revert StartTimeInPast();
         if (endTime <= startTime + MIN_DURATION) revert InvalidDuration();
+        if (cliffDuration >= endTime - startTime) revert InvalidCliffDuration();
 
         streamId = nextStreamId++;
         _streams[streamId] = Stream({
@@ -161,6 +167,7 @@ contract FundingStream is ReentrancyGuard, Pausable, AccessControl {
             withdrawn: 0,
             startTime: startTime,
             endTime: endTime,
+            cliffDuration: cliffDuration,
             lastUpdated: uint48(block.timestamp),
             status: StreamStatus.Active
         });
@@ -174,25 +181,29 @@ contract FundingStream is ReentrancyGuard, Pausable, AccessControl {
     /**
      * @notice Create a new ERC-20 funding stream.
      * @dev Caller must have approved this contract for at least `amount` of `token`.
-     * @param recipient  Address of the stream beneficiary.
-     * @param token      ERC-20 token address.
-     * @param amount     Amount of tokens to deposit.
-     * @param startTime  Unix timestamp for stream start.
-     * @param endTime    Unix timestamp for stream end.
-     * @return streamId  The ID of the newly created stream.
+     * @param recipient      Address of the stream beneficiary.
+     * @param token          ERC-20 token address.
+     * @param amount         Amount of tokens to deposit.
+     * @param startTime      Unix timestamp for stream start.
+     * @param endTime        Unix timestamp for stream end.
+     * @param cliffDuration  Seconds after startTime before vesting begins (0 = no cliff,
+     *                       must be strictly less than endTime - startTime).
+     * @return streamId      The ID of the newly created stream.
      */
     function createERC20Stream(
         address recipient,
         address token,
         uint256 amount,
         uint48 startTime,
-        uint48 endTime
+        uint48 endTime,
+        uint48 cliffDuration
     ) external whenNotPaused returns (uint256 streamId) {
         if (recipient == address(0) || recipient == msg.sender) revert InvalidRecipient();
         if (token == address(0)) revert InvalidRecipient();
         if (amount == 0) revert InvalidAmount();
         if (startTime < block.timestamp) revert StartTimeInPast();
         if (endTime <= startTime + MIN_DURATION) revert InvalidDuration();
+        if (cliffDuration >= endTime - startTime) revert InvalidCliffDuration();
 
         streamId = nextStreamId++;
         _streams[streamId] = Stream({
@@ -203,6 +214,7 @@ contract FundingStream is ReentrancyGuard, Pausable, AccessControl {
             withdrawn: 0,
             startTime: startTime,
             endTime: endTime,
+            cliffDuration: cliffDuration,
             lastUpdated: uint48(block.timestamp),
             status: StreamStatus.Active
         });
@@ -389,10 +401,12 @@ contract FundingStream is ReentrancyGuard, Pausable, AccessControl {
 
     /**
      * @dev Compute the total amount vested at the current timestamp using linear interpolation.
-     *      Returns 0 before start, totalDeposited after end.
+     *      Returns 0 before start or before the cliff elapses, totalDeposited after end.
+     *      After the cliff, vesting is linear over the full startTime→endTime duration.
      */
     function _vestedAmount(Stream storage s) internal view returns (uint256) {
         if (block.timestamp < s.startTime) return 0;
+        if (block.timestamp < s.startTime + s.cliffDuration) return 0;
         if (block.timestamp >= s.endTime) return s.totalDeposited;
         uint256 elapsed = block.timestamp - s.startTime;
         uint256 duration = s.endTime - s.startTime;
