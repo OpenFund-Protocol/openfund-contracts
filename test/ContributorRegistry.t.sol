@@ -211,6 +211,137 @@ contract ContributorRegistryTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                        BATCH REGISTER TESTS
+    //////////////////////////////////////////////////////////////*/
+
+    function test_BatchRegister_Success() public {
+        ContributorRegistry.ContributorInput[] memory inputs =
+            new ContributorRegistry.ContributorInput[](2);
+        inputs[0] = ContributorRegistry.ContributorInput({
+            contributor: alice,
+            projectId: PROJECT_A,
+            role: ContributorRegistry.Role.CONTRIBUTOR,
+            weight: 5000,
+            metadata: "ipfs://alice"
+        });
+        inputs[1] = ContributorRegistry.ContributorInput({
+            contributor: bob,
+            projectId: PROJECT_A,
+            role: ContributorRegistry.Role.MAINTAINER,
+            weight: 3000,
+            metadata: "ipfs://bob"
+        });
+
+        vm.prank(registrar);
+        registry.batchRegister(inputs);
+
+        assertEq(registry.totalContributors(), 2);
+        assertTrue(registry.isActive(alice, PROJECT_A));
+        assertTrue(registry.isActive(bob, PROJECT_A));
+        assertEq(registry.getWeight(alice, PROJECT_A), 5000);
+        assertEq(registry.getWeight(bob, PROJECT_A), 3000);
+    }
+
+    function test_BatchRegister_EmitsOneEventPerContributor() public {
+        ContributorRegistry.ContributorInput[] memory inputs =
+            new ContributorRegistry.ContributorInput[](1);
+        inputs[0] = ContributorRegistry.ContributorInput({
+            contributor: alice,
+            projectId: PROJECT_A,
+            role: ContributorRegistry.Role.CONTRIBUTOR,
+            weight: 5000,
+            metadata: ""
+        });
+
+        vm.expectEmit(true, true, false, true);
+        emit ContributorRegistry.ContributorRegistered(
+            alice, PROJECT_A, ContributorRegistry.Role.CONTRIBUTOR, 5000
+        );
+
+        vm.prank(registrar);
+        registry.batchRegister(inputs);
+    }
+
+    function test_BatchRegister_Atomic_RevertsIfAnyEntryInvalid() public {
+        ContributorRegistry.ContributorInput[] memory inputs =
+            new ContributorRegistry.ContributorInput[](2);
+        inputs[0] = ContributorRegistry.ContributorInput({
+            contributor: alice,
+            projectId: PROJECT_A,
+            role: ContributorRegistry.Role.CONTRIBUTOR,
+            weight: 5000,
+            metadata: ""
+        });
+        // Second entry has invalid weight — should revert entire batch
+        inputs[1] = ContributorRegistry.ContributorInput({
+            contributor: bob,
+            projectId: PROJECT_A,
+            role: ContributorRegistry.Role.MAINTAINER,
+            weight: 0,
+            metadata: ""
+        });
+
+        vm.prank(registrar);
+        vm.expectRevert(abi.encodeWithSelector(ContributorRegistry.InvalidWeight.selector, 0));
+        registry.batchRegister(inputs);
+
+        // Alice must NOT have been registered (atomicity)
+        assertFalse(registry.isRegistered(alice, PROJECT_A));
+    }
+
+    function test_BatchRegister_RevertsOnBatchTooLarge() public {
+        ContributorRegistry.ContributorInput[] memory inputs =
+            new ContributorRegistry.ContributorInput[](51);
+        for (uint256 i; i < 51; ++i) {
+            inputs[i] = ContributorRegistry.ContributorInput({
+                contributor: address(uint160(i + 1)),
+                projectId: PROJECT_A,
+                role: ContributorRegistry.Role.CONTRIBUTOR,
+                weight: 100,
+                metadata: ""
+            });
+        }
+
+        vm.prank(registrar);
+        vm.expectRevert(abi.encodeWithSelector(ContributorRegistry.BatchTooLarge.selector, 51));
+        registry.batchRegister(inputs);
+    }
+
+    function test_BatchRegister_RevertsIfNotRegistrar() public {
+        ContributorRegistry.ContributorInput[] memory inputs =
+            new ContributorRegistry.ContributorInput[](1);
+        inputs[0] = ContributorRegistry.ContributorInput({
+            contributor: alice,
+            projectId: PROJECT_A,
+            role: ContributorRegistry.Role.CONTRIBUTOR,
+            weight: 5000,
+            metadata: ""
+        });
+
+        vm.prank(alice);
+        vm.expectRevert();
+        registry.batchRegister(inputs);
+    }
+
+    function test_BatchRegister_MaxBatchOf50Succeeds() public {
+        ContributorRegistry.ContributorInput[] memory inputs =
+            new ContributorRegistry.ContributorInput[](50);
+        for (uint256 i; i < 50; ++i) {
+            inputs[i] = ContributorRegistry.ContributorInput({
+                contributor: address(uint160(i + 1)),
+                projectId: PROJECT_A,
+                role: ContributorRegistry.Role.CONTRIBUTOR,
+                weight: 100,
+                metadata: ""
+            });
+        }
+
+        vm.prank(registrar);
+        registry.batchRegister(inputs);
+        assertEq(registry.totalContributors(), 50);
+    }
+
+    /*//////////////////////////////////////////////////////////////
                            FUZZ TESTS
     //////////////////////////////////////////////////////////////*/
 
