@@ -38,6 +38,17 @@ contract ContributorRegistry is AccessControl, Pausable {
     }
 
     /**
+     * @notice Input record for batch registration.
+     */
+    struct ContributorInput {
+        address contributor;
+        bytes32 projectId;
+        Role role;
+        uint96 weight;
+        string metadata;
+    }
+
+    /**
      * @notice Full contributor record.
      * @param contributor  Wallet address of the contributor.
      * @param projectId    Identifier of the project they belong to.
@@ -97,6 +108,7 @@ contract ContributorRegistry is AccessControl, Pausable {
     error InvalidWeight(uint96 weight);
     error InvalidAddress();
     error InvalidProjectId();
+    error BatchTooLarge(uint256 count);
 
     /*//////////////////////////////////////////////////////////////
                               CONSTRUCTOR
@@ -132,6 +144,36 @@ contract ContributorRegistry is AccessControl, Pausable {
         uint96 weight,
         string calldata metadata
     ) external onlyRole(REGISTRAR_ROLE) whenNotPaused {
+        _register(contributor, projectId, role, weight, metadata);
+    }
+
+    /**
+     * @notice Register multiple contributors in a single transaction.
+     * @dev Atomic: if any entry is invalid the entire batch reverts. Capped at 50 entries.
+     * @param contributors  Array of contributor inputs to register.
+     */
+    function batchRegister(ContributorInput[] calldata contributors)
+        external
+        onlyRole(REGISTRAR_ROLE)
+        whenNotPaused
+    {
+        if (contributors.length > 50) revert BatchTooLarge(contributors.length);
+        for (uint256 i; i < contributors.length;) {
+            ContributorInput calldata c = contributors[i];
+            _register(c.contributor, c.projectId, c.role, c.weight, c.metadata);
+            unchecked {
+                ++i;
+            }
+        }
+    }
+
+    function _register(
+        address contributor,
+        bytes32 projectId,
+        Role role,
+        uint96 weight,
+        string calldata metadata
+    ) internal {
         if (contributor == address(0)) revert InvalidAddress();
         if (projectId == bytes32(0)) revert InvalidProjectId();
         if (_registered[contributor][projectId]) revert AlreadyRegistered(contributor, projectId);

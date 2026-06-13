@@ -1,0 +1,94 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  FOUNDRY_FUZZ_RUNS: 5000
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Check formatting
+        run: forge fmt --check
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Cache build artifacts
+        uses: actions/cache@v4
+        with:
+          path: |
+            out/
+            cache/
+          key: ${{ runner.os }}-forge-build-${{ hashFiles('foundry.toml', 'contracts/**/*.sol') }}
+          restore-keys: |
+            ${{ runner.os }}-forge-build-
+
+      - name: Build contracts
+        run: forge build
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Cache lib
+        uses: actions/cache@v4
+        with:
+          path: lib/
+          key: ${{ runner.os }}-lib-${{ hashFiles('.gitmodules') }}
+          restore-keys: |
+            ${{ runner.os }}-lib-
+
+      - name: Run tests
+        run: forge test -vv
+
+  gas-snapshot:
+    name: Gas Snapshot
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: stable
+
+      - name: Check gas snapshot
+        run: forge snapshot --check
+        continue-on-error: true

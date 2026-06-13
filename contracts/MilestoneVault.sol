@@ -30,6 +30,14 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
     //////////////////////////////////////////////////////////////*/
 
     bytes32 public constant VAULT_ADMIN_ROLE = keccak256("VAULT_ADMIN_ROLE");
+    bytes32 public constant ARBITRATOR_ROLE = keccak256("ARBITRATOR_ROLE");
+
+    /*//////////////////////////////////////////////////////////////
+                            DISPUTE CONSTANTS
+    //////////////////////////////////////////////////////////////*/
+
+    uint48 public constant MIN_DISPUTE_WINDOW = 1 days;
+    uint48 public constant MAX_DISPUTE_WINDOW = 90 days;
 
     /*//////////////////////////////////////////////////////////////
                                 TYPES
@@ -43,7 +51,8 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
         Submitted,
         Approved,
         Rejected,
-        Cancelled
+        Cancelled,
+        Disputed
     }
 
     /**
@@ -73,14 +82,15 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
 
     /**
      * @notice A funding vault containing multiple milestones.
-     * @param funder       Address that created and funded the vault.
-     * @param recipient    Address that receives milestone payouts.
-     * @param validator    Address authorized to approve/reject milestones.
-     * @param token        ERC-20 address, or address(0) for ETH.
-     * @param totalDeposited  Total amount deposited.
-     * @param totalReleased   Total amount released to recipient.
-     * @param status       Overall vault status.
-     * @param createdAt    Timestamp of vault creation.
+     * @param funder                Address that created and funded the vault.
+     * @param recipient             Address that receives milestone payouts.
+     * @param validator             Address authorized to approve/reject milestones.
+     * @param token                 ERC-20 address, or address(0) for ETH.
+     * @param totalDeposited        Total amount deposited.
+     * @param totalReleased         Total amount released to recipient.
+     * @param status                Overall vault status.
+     * @param createdAt             Timestamp of vault creation.
+     * @param disputeWindowSeconds  Seconds after submission before recipient can escalate.
      */
     struct Vault {
         address funder;
@@ -91,6 +101,7 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
         uint256 totalReleased;
         VaultStatus status;
         uint48 createdAt;
+        uint48 disputeWindowSeconds;
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -129,6 +140,8 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
     event MilestoneSubmitted(uint256 indexed vaultId, uint256 indexed milestoneIndex);
     event MilestoneApproved(uint256 indexed vaultId, uint256 indexed milestoneIndex, uint256 amount);
     event MilestoneRejected(uint256 indexed vaultId, uint256 indexed milestoneIndex);
+    event MilestoneEscalated(uint256 indexed vaultId, uint256 indexed milestoneIndex);
+    event DisputeResolved(uint256 indexed vaultId, uint256 indexed milestoneIndex, bool approved);
     event VaultCancelled(uint256 indexed vaultId, uint256 refundAmount);
     event ValidatorUpdated(uint256 indexed vaultId, address newValidator);
 
@@ -144,11 +157,14 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
     error MilestoneNotFound(uint256 vaultId, uint256 milestoneIndex);
     error MilestoneNotPending(uint256 vaultId, uint256 milestoneIndex);
     error MilestoneNotSubmitted(uint256 vaultId, uint256 milestoneIndex);
+    error MilestoneNotDisputed(uint256 vaultId, uint256 milestoneIndex);
     error InsufficientVaultBalance(uint256 required, uint256 available);
     error MilestoneTotalExceedsDeposit(uint256 total, uint256 deposited);
     error PreviousMilestoneNotApproved(uint256 milestoneIndex);
     error ETHTransferFailed();
     error TokenMismatch();
+    error InvalidDisputeWindow(uint48 window);
+    error DisputeWindowNotExpired(uint256 vaultId, uint256 milestoneIndex);
 
     /*//////////////////////////////////////////////////////////////
                              CONSTRUCTOR
@@ -158,6 +174,7 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
         if (admin == address(0)) revert InvalidAddress();
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(VAULT_ADMIN_ROLE, admin);
+        _grantRole(ARBITRATOR_ROLE, admin);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -166,11 +183,13 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
 
     /**
      * @notice Create a new vault funded with ETH.
-     * @param recipient   Address to receive milestone payouts.
-     * @param validator   Address authorized to approve/reject milestones.
-     * @return vaultId    The ID of the newly created vault.
+     * @param recipient             Address to receive milestone payouts.
+     * @param validator             Address authorized to approve/reject milestones.
+     * @param disputeWindowSeconds  Seconds after milestone submission before recipient can escalate.
+     *                              Must be between MIN_DISPUTE_WINDOW and MAX_DISPUTE_WINDOW.
+     * @return vaultId              The ID of the newly created vault.
      */
-    function createETHVault(address recipient, address validator)
+    function createETHVault(address recipient, address validator, uint48 disputeWindowSeconds)
         external
         payable
         whenNotPaused
@@ -179,31 +198,41 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
         if (recipient == address(0)) revert InvalidAddress();
         if (validator == address(0)) revert InvalidAddress();
         if (msg.value == 0) revert InvalidAmount();
+        if (disputeWindowSeconds < MIN_DISPUTE_WINDOW || disputeWindowSeconds > MAX_DISPUTE_WINDOW) {
+            revert InvalidDisputeWindow(disputeWindowSeconds);
+        }
 
-        vaultId = _createVault(recipient, validator, address(0), msg.value);
+        vaultId = _createVault(recipient, validator, address(0), msg.value, disputeWindowSeconds);
     }
 
     /**
      * @notice Create a new vault funded with ERC-20 tokens.
      * @dev Caller must have approved this contract for at least `amount`.
-     * @param recipient  Address to receive milestone payouts.
-     * @param validator  Address authorized to approve/reject milestones.
-     * @param token      ERC-20 token address.
-     * @param amount     Initial deposit amount.
-     * @return vaultId   The ID of the newly created vault.
+     * @param recipient             Address to receive milestone payouts.
+     * @param validator             Address authorized to approve/reject milestones.
+     * @param token                 ERC-20 token address.
+     * @param amount                Initial deposit amount.
+     * @param disputeWindowSeconds  Seconds after milestone submission before recipient can escalate.
+     *                              Must be between MIN_DISPUTE_WINDOW and MAX_DISPUTE_WINDOW.
+     * @return vaultId              The ID of the newly created vault.
      */
-    function createERC20Vault(address recipient, address validator, address token, uint256 amount)
-        external
-        whenNotPaused
-        returns (uint256 vaultId)
-    {
+    function createERC20Vault(
+        address recipient,
+        address validator,
+        address token,
+        uint256 amount,
+        uint48 disputeWindowSeconds
+    ) external whenNotPaused returns (uint256 vaultId) {
         if (recipient == address(0)) revert InvalidAddress();
         if (validator == address(0)) revert InvalidAddress();
         if (token == address(0)) revert InvalidAddress();
         if (amount == 0) revert InvalidAmount();
+        if (disputeWindowSeconds < MIN_DISPUTE_WINDOW || disputeWindowSeconds > MAX_DISPUTE_WINDOW) {
+            revert InvalidDisputeWindow(disputeWindowSeconds);
+        }
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        vaultId = _createVault(recipient, validator, token, amount);
+        vaultId = _createVault(recipient, validator, token, amount, disputeWindowSeconds);
     }
 
     /**
@@ -388,9 +417,91 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
     }
 
     /**
+     * @notice Escalate a submitted milestone to Disputed status after the dispute window expires.
+     * @dev Only the recipient may call. The milestone must be in Submitted status and the
+     *      dispute window must have elapsed since submission.
+     * @param vaultId         Vault identifier.
+     * @param milestoneIndex  Index of the milestone to escalate.
+     */
+    function escalate(uint256 vaultId, uint256 milestoneIndex) external whenNotPaused {
+        Vault storage v = _vaults[vaultId];
+        if (v.funder == address(0)) revert VaultNotFound(vaultId);
+        if (msg.sender != v.recipient) revert Unauthorized();
+        if (v.status != VaultStatus.Active) revert VaultNotActive(vaultId);
+
+        Milestone[] storage milestones = _milestones[vaultId];
+        if (milestoneIndex >= milestones.length) {
+            revert MilestoneNotFound(vaultId, milestoneIndex);
+        }
+
+        Milestone storage m = milestones[milestoneIndex];
+        if (m.status != MilestoneStatus.Submitted) {
+            revert MilestoneNotSubmitted(vaultId, milestoneIndex);
+        }
+        if (block.timestamp <= uint256(m.submittedAt) + uint256(v.disputeWindowSeconds)) {
+            revert DisputeWindowNotExpired(vaultId, milestoneIndex);
+        }
+
+        m.status = MilestoneStatus.Disputed;
+
+        emit MilestoneEscalated(vaultId, milestoneIndex);
+    }
+
+    /**
+     * @notice Resolve a disputed milestone as an arbitrator.
+     * @dev Only an address with ARBITRATOR_ROLE may call. Approving releases funds to the
+     *      recipient; rejecting resets the milestone to Pending for rework.
+     * @param vaultId         Vault identifier.
+     * @param milestoneIndex  Index of the disputed milestone.
+     * @param approve         True to approve and release funds; false to reset to Pending.
+     */
+    function resolveDispute(uint256 vaultId, uint256 milestoneIndex, bool approve)
+        external
+        nonReentrant
+        whenNotPaused
+    {
+        if (!hasRole(ARBITRATOR_ROLE, msg.sender)) revert Unauthorized();
+
+        Vault storage v = _vaults[vaultId];
+        if (v.funder == address(0)) revert VaultNotFound(vaultId);
+        if (v.status != VaultStatus.Active) revert VaultNotActive(vaultId);
+
+        Milestone[] storage milestones = _milestones[vaultId];
+        if (milestoneIndex >= milestones.length) {
+            revert MilestoneNotFound(vaultId, milestoneIndex);
+        }
+
+        Milestone storage m = milestones[milestoneIndex];
+        if (m.status != MilestoneStatus.Disputed) {
+            revert MilestoneNotDisputed(vaultId, milestoneIndex);
+        }
+
+        if (approve) {
+            uint256 amount = m.amount;
+            uint256 available = v.totalDeposited - v.totalReleased;
+            if (amount > available) revert InsufficientVaultBalance(amount, available);
+
+            m.status = MilestoneStatus.Approved;
+            m.resolvedAt = uint48(block.timestamp);
+            v.totalReleased += amount;
+
+            if (_allApproved(vaultId)) {
+                v.status = VaultStatus.Completed;
+            }
+
+            _transfer(v.token, v.recipient, amount);
+        } else {
+            m.status = MilestoneStatus.Pending;
+            m.resolvedAt = uint48(block.timestamp);
+        }
+
+        emit DisputeResolved(vaultId, milestoneIndex, approve);
+    }
+
+    /**
      * @notice Cancel a vault and return all unreleased funds to the funder.
      * @dev Only the funder or a VAULT_ADMIN can cancel. Cannot cancel if any milestone
-     *      is in Submitted state (to prevent cancellation during review).
+     *      is in Submitted or Disputed state (to prevent cancellation during review).
      * @param vaultId Vault identifier.
      */
     function cancelVault(uint256 vaultId) external nonReentrant whenNotPaused {
@@ -401,10 +512,11 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
         }
         if (v.status != VaultStatus.Active) revert VaultNotActive(vaultId);
 
-        // Block cancellation while a milestone is under review
+        // Block cancellation while a milestone is under review or in dispute
         Milestone[] storage milestones = _milestones[vaultId];
         for (uint256 i; i < milestones.length;) {
-            if (milestones[i].status == MilestoneStatus.Submitted) {
+            MilestoneStatus s = milestones[i].status;
+            if (s == MilestoneStatus.Submitted || s == MilestoneStatus.Disputed) {
                 revert MilestoneNotPending(vaultId, i);
             }
             unchecked {
@@ -504,10 +616,13 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
                             INTERNAL HELPERS
     //////////////////////////////////////////////////////////////*/
 
-    function _createVault(address recipient, address validator, address token, uint256 amount)
-        internal
-        returns (uint256 vaultId)
-    {
+    function _createVault(
+        address recipient,
+        address validator,
+        address token,
+        uint256 amount,
+        uint48 disputeWindowSeconds
+    ) internal returns (uint256 vaultId) {
         vaultId = nextVaultId++;
         _vaults[vaultId] = Vault({
             funder: msg.sender,
@@ -517,7 +632,8 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
             totalDeposited: amount,
             totalReleased: 0,
             status: VaultStatus.Active,
-            createdAt: uint48(block.timestamp)
+            createdAt: uint48(block.timestamp),
+            disputeWindowSeconds: disputeWindowSeconds
         });
 
         _funderVaults[msg.sender].push(vaultId);
