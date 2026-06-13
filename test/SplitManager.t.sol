@@ -245,6 +245,121 @@ contract SplitManagerTest is Test {
     }
 
     /*//////////////////////////////////////////////////////////////
+                         PROTOCOL FEE
+    //////////////////////////////////////////////////////////////*/
+
+    function _setupFee(uint16 feeBps) internal {
+        address feeAddr = makeAddr("feeRecipient");
+        vm.startPrank(admin);
+        splits.setFeeRecipient(feeAddr);
+        splits.setProtocolFee(feeBps);
+        vm.stopPrank();
+    }
+
+    function test_SetProtocolFee_Success() public {
+        vm.prank(admin);
+        splits.setProtocolFee(200);
+        assertEq(splits.protocolFeeBps(), 200);
+    }
+
+    function test_SetProtocolFee_RevertsAboveMax() public {
+        vm.prank(admin);
+        vm.expectRevert(SplitManager.FeeTooHigh.selector);
+        splits.setProtocolFee(501);
+    }
+
+    function test_SetFeeRecipient_RevertsOnZeroAddress() public {
+        vm.prank(admin);
+        vm.expectRevert(SplitManager.InvalidFeeRecipient.selector);
+        splits.setFeeRecipient(address(0));
+    }
+
+    function test_ProtocolFeeETH_DeductedBeforePayees() public {
+        _setupFee(200); // 2%
+        address feeAddr = splits.feeRecipient();
+
+        vm.prank(admin);
+        splits.defineSplit(PROJECT_A, defaultPayees);
+
+        vm.deal(address(this), 1 ether);
+        splits.distributeETH{value: 1 ether}(PROJECT_A);
+
+        // Fee = 2% of 1 ether = 0.02 ether
+        assertEq(splits.claimableBalance(feeAddr, address(0)), 0.02 ether);
+
+        // Payees share 0.98 ether at their BPS ratios
+        uint256 distributable = 0.98 ether;
+        assertEq(splits.claimableBalance(alice, address(0)), (distributable * 5000) / 10_000);
+        assertEq(splits.claimableBalance(bob, address(0)), (distributable * 3000) / 10_000);
+    }
+
+    function test_ProtocolFeeERC20_DeductedBeforePayees() public {
+        _setupFee(100); // 1%
+        address feeAddr = splits.feeRecipient();
+
+        vm.prank(admin);
+        splits.defineSplit(PROJECT_A, defaultPayees);
+
+        vm.prank(admin);
+        splits.distributeERC20(PROJECT_A, address(token), 10_000e18);
+
+        // Fee = 1% of 10_000e18 = 100e18
+        assertEq(splits.claimableBalance(feeAddr, address(token)), 100e18);
+
+        // Payees share 9_900e18
+        assertEq(splits.claimableBalance(alice, address(token)), (9_900e18 * 5000) / 10_000);
+    }
+
+    function test_FeeExemptProject_ReceivesFullAmount() public {
+        _setupFee(200);
+        address feeAddr = splits.feeRecipient();
+
+        vm.startPrank(admin);
+        splits.defineSplit(PROJECT_A, defaultPayees);
+        splits.setFeeExempt(PROJECT_A, true);
+        vm.stopPrank();
+
+        vm.deal(address(this), 1 ether);
+        splits.distributeETH{value: 1 ether}(PROJECT_A);
+
+        // No fee charged
+        assertEq(splits.claimableBalance(feeAddr, address(0)), 0);
+
+        // Payees receive full 1 ether
+        uint256 total = splits.claimableBalance(alice, address(0))
+            + splits.claimableBalance(bob, address(0))
+            + splits.claimableBalance(treasury, address(0));
+        assertEq(total, 1 ether);
+    }
+
+    function test_ZeroFee_IsNoOp() public {
+        // No fee configured — distributable == amount
+        vm.prank(admin);
+        splits.defineSplit(PROJECT_A, defaultPayees);
+
+        vm.deal(address(this), 1 ether);
+        splits.distributeETH{value: 1 ether}(PROJECT_A);
+
+        uint256 total = splits.claimableBalance(alice, address(0))
+            + splits.claimableBalance(bob, address(0))
+            + splits.claimableBalance(treasury, address(0));
+        assertEq(total, 1 ether);
+    }
+
+    function test_ProtocolFeeCharged_EmitsEvent() public {
+        _setupFee(200);
+
+        vm.prank(admin);
+        splits.defineSplit(PROJECT_A, defaultPayees);
+
+        vm.expectEmit(true, true, false, true);
+        emit SplitManager.ProtocolFeeCharged(PROJECT_A, address(0), 0.02 ether);
+
+        vm.deal(address(this), 1 ether);
+        splits.distributeETH{value: 1 ether}(PROJECT_A);
+    }
+
+    /*//////////////////////////////////////////////////////////////
                            FUZZ TESTS
     //////////////////////////////////////////////////////////////*/
 
@@ -260,6 +375,26 @@ contract SplitManagerTest is Test {
         uint256 total = splits.claimableBalance(alice, address(0))
             + splits.claimableBalance(bob, address(0))
             + splits.claimableBalance(treasury, address(0));
+        assertEq(total, amount);
+    }
+
+    function testFuzz_ProtocolFee_TotalAlwaysConserved(uint256 amount, uint16 feeBps) public {
+        feeBps = uint16(bound(feeBps, 0, 500));
+        amount = bound(amount, 1, 100 ether);
+
+        _setupFee(feeBps);
+        address feeAddr = splits.feeRecipient();
+
+        vm.prank(admin);
+        splits.defineSplit(PROJECT_A, defaultPayees);
+
+        vm.deal(address(this), amount);
+        splits.distributeETH{value: amount}(PROJECT_A);
+
+        uint256 total = splits.claimableBalance(alice, address(0))
+            + splits.claimableBalance(bob, address(0))
+            + splits.claimableBalance(treasury, address(0))
+            + splits.claimableBalance(feeAddr, address(0));
         assertEq(total, amount);
     }
 }

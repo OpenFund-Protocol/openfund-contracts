@@ -26,7 +26,7 @@ contract CreateStream is Script {
 
         vm.startBroadcast();
         uint256 streamId =
-            funding.createETHStream{value: amount}(recipient, startTime, endTime);
+            funding.createETHStream{value: amount}(recipient, startTime, endTime, 0);
         vm.stopBroadcast();
 
         console2.log("Stream created - ID:", streamId);

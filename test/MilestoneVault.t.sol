@@ -32,7 +32,7 @@ contract MilestoneVaultTest is Test {
 
     function test_CreateETHVault_Success() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator);
+        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator, true);
 
         MilestoneVault.Vault memory v = vault.getVault(vaultId);
         assertEq(v.funder, funder);
@@ -40,6 +40,7 @@ contract MilestoneVaultTest is Test {
         assertEq(v.validator, validator);
         assertEq(v.token, address(0));
         assertEq(v.totalDeposited, 10 ether);
+        assertTrue(v.sequential);
         assertEq(uint8(v.status), uint8(MilestoneVault.VaultStatus.Active));
     }
 
@@ -48,24 +49,24 @@ contract MilestoneVaultTest is Test {
         emit MilestoneVault.VaultCreated(0, funder, recipient, validator, address(0), 5 ether);
 
         vm.prank(funder);
-        vault.createETHVault{value: 5 ether}(recipient, validator);
+        vault.createETHVault{value: 5 ether}(recipient, validator, true);
     }
 
     function test_CreateETHVault_RevertsOnZeroRecipient() public {
         vm.prank(funder);
         vm.expectRevert(MilestoneVault.InvalidAddress.selector);
-        vault.createETHVault{value: 1 ether}(address(0), validator);
+        vault.createETHVault{value: 1 ether}(address(0), validator, true);
     }
 
     function test_CreateETHVault_RevertsOnZeroValidator() public {
         vm.prank(funder);
         vm.expectRevert(MilestoneVault.InvalidAddress.selector);
-        vault.createETHVault{value: 1 ether}(recipient, address(0));
+        vault.createETHVault{value: 1 ether}(recipient, address(0), true);
     }
 
     function test_CreateERC20Vault_Success() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createERC20Vault(recipient, validator, address(token), 1000e18);
+        uint256 vaultId = vault.createERC20Vault(recipient, validator, address(token), 1000e18, true);
 
         MilestoneVault.Vault memory v = vault.getVault(vaultId);
         assertEq(v.token, address(token));
@@ -82,7 +83,7 @@ contract MilestoneVaultTest is Test {
         returns (uint256 vaultId, uint256 milestoneIdx)
     {
         vm.prank(funder);
-        vaultId = vault.createETHVault{value: amount}(recipient, validator);
+        vaultId = vault.createETHVault{value: amount}(recipient, validator, true);
 
         vm.prank(funder);
         vault.addMilestone(vaultId, amount, "ipfs://milestone-1");
@@ -91,7 +92,7 @@ contract MilestoneVaultTest is Test {
 
     function test_AddMilestone_Success() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator);
+        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator, true);
 
         vm.prank(funder);
         vault.addMilestone(vaultId, 5 ether, "ipfs://milestone-1");
@@ -104,7 +105,7 @@ contract MilestoneVaultTest is Test {
 
     function test_AddMilestone_RevertsIfExceedsDeposit() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator);
+        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true);
 
         vm.prank(funder);
         vm.expectRevert(
@@ -115,7 +116,7 @@ contract MilestoneVaultTest is Test {
 
     function test_AddMilestone_RevertsIfNotFunder() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator);
+        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true);
 
         vm.prank(attacker);
         vm.expectRevert(MilestoneVault.Unauthorized.selector);
@@ -147,7 +148,7 @@ contract MilestoneVaultTest is Test {
 
     function test_SubmitMilestone_EnforcesSequentialOrder() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator);
+        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator, true);
 
         vm.startPrank(funder);
         vault.addMilestone(vaultId, 5 ether, "milestone-0");
@@ -246,7 +247,7 @@ contract MilestoneVaultTest is Test {
 
     function test_CancelVault_RefundsFunder() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator);
+        uint256 vaultId = vault.createETHVault{value: 10 ether}(recipient, validator, true);
 
         // Add both milestones upfront so the vault stays Active after ms-0 is approved
         vm.startPrank(funder);
@@ -282,7 +283,7 @@ contract MilestoneVaultTest is Test {
 
     function test_CancelVault_RevertsIfNotFunder() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator);
+        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true);
 
         vm.prank(attacker);
         vm.expectRevert(MilestoneVault.Unauthorized.selector);
@@ -295,7 +296,7 @@ contract MilestoneVaultTest is Test {
 
     function test_UpdateValidator_Success() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator);
+        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true);
 
         address newValidator = makeAddr("newValidator");
         vm.prank(funder);
@@ -310,7 +311,7 @@ contract MilestoneVaultTest is Test {
 
     function test_FundETHVault_IncreasesDeposit() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator);
+        uint256 vaultId = vault.createETHVault{value: 5 ether}(recipient, validator, true);
 
         vm.deal(attacker, 5 ether); // anyone can top-up
         vm.prank(attacker);
@@ -342,7 +343,7 @@ contract MilestoneVaultTest is Test {
 
     function test_FullMultiMilestoneFlow() public {
         vm.prank(funder);
-        uint256 vaultId = vault.createETHVault{value: 9 ether}(recipient, validator);
+        uint256 vaultId = vault.createETHVault{value: 9 ether}(recipient, validator, true);
 
         vm.startPrank(funder);
         vault.addMilestone(vaultId, 3 ether, "phase-1");
@@ -359,5 +360,55 @@ contract MilestoneVaultTest is Test {
 
         assertEq(recipient.balance, 9 ether);
         assertEq(uint8(vault.getVault(vaultId).status), uint8(MilestoneVault.VaultStatus.Completed));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                    PARALLEL MILESTONE FLOW
+    //////////////////////////////////////////////////////////////*/
+
+    function test_ParallelVault_AnyMilestoneCanBeSubmittedFirst() public {
+        vm.prank(funder);
+        uint256 vaultId = vault.createETHVault{value: 9 ether}(recipient, validator, false);
+
+        vm.startPrank(funder);
+        vault.addMilestone(vaultId, 3 ether, "frontend");
+        vault.addMilestone(vaultId, 3 ether, "backend");
+        vault.addMilestone(vaultId, 3 ether, "devops");
+        vm.stopPrank();
+
+        assertFalse(vault.getVault(vaultId).sequential);
+
+        // Submit and approve milestone 2 first, then 0, skipping 1 for now
+        vm.prank(recipient);
+        vault.submitMilestone(vaultId, 2);
+        vm.prank(validator);
+        vault.approveMilestone(vaultId, 2);
+
+        vm.prank(recipient);
+        vault.submitMilestone(vaultId, 0);
+        vm.prank(validator);
+        vault.approveMilestone(vaultId, 0);
+
+        // Vault still Active — milestone 1 pending
+        assertEq(uint8(vault.getVault(vaultId).status), uint8(MilestoneVault.VaultStatus.Active));
+
+        // Now approve milestone 1 last
+        vm.prank(recipient);
+        vault.submitMilestone(vaultId, 1);
+        vm.prank(validator);
+        vault.approveMilestone(vaultId, 1);
+
+        assertEq(recipient.balance, 9 ether);
+        assertEq(uint8(vault.getVault(vaultId).status), uint8(MilestoneVault.VaultStatus.Completed));
+    }
+
+    function test_ParallelVault_SequentialFlagStoredCorrectly() public {
+        vm.prank(funder);
+        uint256 seqId = vault.createETHVault{value: 1 ether}(recipient, validator, true);
+        vm.prank(funder);
+        uint256 parId = vault.createETHVault{value: 1 ether}(recipient, validator, false);
+
+        assertTrue(vault.getVault(seqId).sequential);
+        assertFalse(vault.getVault(parId).sequential);
     }
 }

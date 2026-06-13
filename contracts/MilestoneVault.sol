@@ -73,14 +73,15 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
 
     /**
      * @notice A funding vault containing multiple milestones.
-     * @param funder       Address that created and funded the vault.
-     * @param recipient    Address that receives milestone payouts.
-     * @param validator    Address authorized to approve/reject milestones.
-     * @param token        ERC-20 address, or address(0) for ETH.
-     * @param totalDeposited  Total amount deposited.
-     * @param totalReleased   Total amount released to recipient.
-     * @param status       Overall vault status.
-     * @param createdAt    Timestamp of vault creation.
+     * @param funder         Address that created and funded the vault.
+     * @param recipient      Address that receives milestone payouts.
+     * @param validator      Address authorized to approve/reject milestones.
+     * @param token          ERC-20 address, or address(0) for ETH.
+     * @param totalDeposited Total amount deposited.
+     * @param totalReleased  Total amount released to recipient.
+     * @param status         Overall vault status.
+     * @param sequential     When true, milestones must be completed in order.
+     * @param createdAt      Timestamp of vault creation.
      */
     struct Vault {
         address funder;
@@ -90,6 +91,7 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
         uint256 totalDeposited;
         uint256 totalReleased;
         VaultStatus status;
+        bool sequential;
         uint48 createdAt;
     }
 
@@ -168,9 +170,11 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
      * @notice Create a new vault funded with ETH.
      * @param recipient   Address to receive milestone payouts.
      * @param validator   Address authorized to approve/reject milestones.
+     * @param sequential  When true, milestones must be submitted and approved in order.
+     *                    When false, any Pending milestone may be submitted independently.
      * @return vaultId    The ID of the newly created vault.
      */
-    function createETHVault(address recipient, address validator)
+    function createETHVault(address recipient, address validator, bool sequential)
         external
         payable
         whenNotPaused
@@ -180,19 +184,21 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
         if (validator == address(0)) revert InvalidAddress();
         if (msg.value == 0) revert InvalidAmount();
 
-        vaultId = _createVault(recipient, validator, address(0), msg.value);
+        vaultId = _createVault(recipient, validator, address(0), msg.value, sequential);
     }
 
     /**
      * @notice Create a new vault funded with ERC-20 tokens.
      * @dev Caller must have approved this contract for at least `amount`.
-     * @param recipient  Address to receive milestone payouts.
-     * @param validator  Address authorized to approve/reject milestones.
-     * @param token      ERC-20 token address.
-     * @param amount     Initial deposit amount.
-     * @return vaultId   The ID of the newly created vault.
+     * @param recipient   Address to receive milestone payouts.
+     * @param validator   Address authorized to approve/reject milestones.
+     * @param token       ERC-20 token address.
+     * @param amount      Initial deposit amount.
+     * @param sequential  When true, milestones must be submitted and approved in order.
+     *                    When false, any Pending milestone may be submitted independently.
+     * @return vaultId    The ID of the newly created vault.
      */
-    function createERC20Vault(address recipient, address validator, address token, uint256 amount)
+    function createERC20Vault(address recipient, address validator, address token, uint256 amount, bool sequential)
         external
         whenNotPaused
         returns (uint256 vaultId)
@@ -203,7 +209,7 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
         if (amount == 0) revert InvalidAmount();
 
         IERC20(token).safeTransferFrom(msg.sender, address(this), amount);
-        vaultId = _createVault(recipient, validator, token, amount);
+        vaultId = _createVault(recipient, validator, token, amount, sequential);
     }
 
     /**
@@ -303,8 +309,8 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
             revert MilestoneNotPending(vaultId, milestoneIndex);
         }
 
-        // Enforce sequential ordering: previous milestone must be approved
-        if (milestoneIndex > 0) {
+        // Enforce sequential ordering only when the vault requires it
+        if (v.sequential && milestoneIndex > 0) {
             if (milestones[milestoneIndex - 1].status != MilestoneStatus.Approved) {
                 revert PreviousMilestoneNotApproved(milestoneIndex - 1);
             }
@@ -504,7 +510,7 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
                             INTERNAL HELPERS
     //////////////////////////////////////////////////////////////*/
 
-    function _createVault(address recipient, address validator, address token, uint256 amount)
+    function _createVault(address recipient, address validator, address token, uint256 amount, bool sequential)
         internal
         returns (uint256 vaultId)
     {
@@ -517,6 +523,7 @@ contract MilestoneVault is ReentrancyGuard, Pausable, AccessControl {
             totalDeposited: amount,
             totalReleased: 0,
             status: VaultStatus.Active,
+            sequential: sequential,
             createdAt: uint48(block.timestamp)
         });
 
